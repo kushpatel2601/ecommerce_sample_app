@@ -104,6 +104,28 @@ def create_order():
     shipping_address_id = data.get('shippingAddressId')
     idmp_key = request.headers.get('Idempotency-Key')
 
+    # --- BUG FIX: Check idempotency key FIRST, before any external service calls ---
+    # Previously, the key was only enforced at DB INSERT (via UNIQUE KEY constraint),
+    # meaning duplicate requests would still call User/Product services and reserve
+    # stock before failing. Now we short-circuit immediately if the key already exists.
+    if idmp_key:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Database connection failed'}), 500
+        try:
+            cur = conn.cursor(dictionary=True)
+            cur.execute(
+                "SELECT id, status FROM orders WHERE idempotency_key = %s LIMIT 1",
+                (idmp_key,)
+            )
+            existing = cur.fetchone()
+        finally:
+            conn.close()
+        if existing:
+            # Return the original order response — idempotent, no side effects
+            return jsonify({'id': existing['id'], 'status': existing['status']}), 200
+    # --- END BUG FIX ---
+
     ok, err = _validate_items(items)
     if not ok:
         return jsonify({'error': err}), 400
